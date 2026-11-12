@@ -1,6 +1,6 @@
 FROM debian:bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential cmake python3 python3-aiohttp z80asm cpmtools libcurl4-openssl-dev \
+    build-essential cmake python3 python3-aiohttp z80asm z80dasm cpmtools libcurl4-openssl-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /opt/altair
 COPY sbc/ sbc/

@@ -11,6 +11,7 @@ The terminal UI and container integration originate in esp32-altair-8800.
 Apple silicon macOS, the Apple `container` CLI and service, Python 3, CMake,
 a C compiler, and an audio output device. The first build needs network access
 for Debian packages and the pinned miniaudio header.
+The image includes `z80asm`, `z80dasm` and `cpmtools` for Z80 and CP/M work.
 
 ```sh
 container system start
