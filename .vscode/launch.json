@@ -1,0 +1,20 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Z80 CP/M: Debug DCC program in Apple container",
+      "type": "cppdbg",
+      "request": "launch",
+      "preLaunchTask": "Prepare Z80 Apple container",
+      "program": "${fileDirname}/${fileBasenameNoExtension}.COM",
+      "cwd": "${fileDirname}",
+      "MIMode": "gdb",
+      "miDebuggerPath": "${workspaceFolder}/docker/debug_proxy.py",
+      "miDebuggerArgs": "--workspace \"${workspaceFolder}\" --program \"${fileDirname}/${fileBasenameNoExtension}.COM\"",
+      "targetArchitecture": "x86",
+      "stopAtEntry": false,
+      "launchCompleteCommand": "exec-continue",
+      "externalConsole": false
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Prepare Z80 Apple container",
+      "type": "process",
+      "command": "python3",
+      "args": ["${workspaceFolder}/docker/prepare.py"],
+      "options": {"cwd": "${workspaceFolder}"},
+      "problemMatcher": []
+    }
+  ]
+}

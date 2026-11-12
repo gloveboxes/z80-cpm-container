@@ -1,0 +1,31 @@
+#ifndef Z80SBC_PINS_H
+#define Z80SBC_PINS_H
+
+enum {
+  PIN_BUSACK_N = 0,
+  PIN_IORQ_N = 1,
+  PIN_CLK = 2,
+  PIN_RESET_N = 3,
+  PIN_BUSREQ_N = 4,
+  PIN_BOOT_READ_DISABLE = 5,
+  PIN_DATA_UP_OE_N = 6,
+  PIN_DATA_DOWN_OE_N = 7,
+  PIN_MEMORY_BANK = 8,
+  PIN_IO_RELEASE = 9,
+  PIN_DATA_0 = 10,
+  PIN_DATA_1 = 11,
+  PIN_DATA_2 = 12,
+  PIN_DATA_3 = 13,
+  PIN_DATA_4 = 14,
+  PIN_DATA_5 = 15,
+  PIN_DATA_6 = 16,
+  PIN_DATA_7 = 17,
+  PIN_PORT_A0 = 18,
+  PIN_PORT_A1 = 19,
+  PIN_PORT_A2 = 20,
+  PIN_PORT_A4 = 21,
+  PIN_RD_N = 27,
+  PIN_WR_N = 28,
+};
+
+#endif

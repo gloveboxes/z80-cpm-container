@@ -1,0 +1,725 @@
+from __future__ import annotations
+
+import binascii
+import os
+import shutil
+import struct
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+import build_images
+import disassemble_cpm64
+
+
+class BuildImagesTest(unittest.TestCase):
+    def test_cpmtools_multi_extent_files_match_bios(self) -> None:
+        cpmcp = shutil.which("cpmcp")
+        if cpmcp is None:
+            self.skipTest("cpmtools is required")
+        payload = bytes(range(256)) * 137 + b"last bytes"
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / "diskdefs").write_text(build_images.cpm_diskdefs())
+            disk = directory / "drive.img"
+            disk.write_bytes(self.native_drive)
+            program = directory / "LARGE.BIN"
+            program.write_bytes(payload)
+            subprocess.run([cpmcp, "-f", "z80sbc", str(disk), str(program), "0:LARGE.BIN"],
+                           cwd=directory, check=True)
+            data = disk.read_bytes()
+            entries = [data[offset:offset + 32] for offset in range(
+                build_images.SYSTEM_BYTES, build_images.SYSTEM_BYTES + 2048, 32)]
+            found = sorted((e for e in entries if e[0] == 0 and e[1:12] == b"LARGE   BIN"),
+                           key=lambda e: e[12])
+            self.assertEqual([entry[12] for entry in found], [0, 1, 2])
+            restored = bytearray()
+            for entry in found:
+                self.assertLessEqual(entry[15], 128)
+                self.assertEqual(entry[24:], bytes(8))
+                contents = b"".join(data[build_images.SYSTEM_BYTES + block * 2048:
+                                            build_images.SYSTEM_BYTES + (block + 1) * 2048]
+                                    for block in entry[16:24] if block)
+                restored.extend(contents[:entry[15] * 128])
+            self.assertEqual(restored[:len(payload)], payload)
+            extracted = directory / "extracted.bin"
+            subprocess.run([cpmcp, "-f", "z80sbc", str(disk), "0:LARGE.BIN", str(extracted)],
+                           cwd=directory, check=True)
+            self.assertEqual(extracted.read_bytes(), payload)
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        assembler = shutil.which("z80asm")
+        if assembler is None:
+            raise unittest.SkipTest("z80asm is not installed")
+
+        cls.cpm_system = build_images.load_cpm_system()
+        cls.z80_system = build_images.build_cpm_system(assembler)
+        cls.bios = build_images.build_bios(assembler)
+        cls.z80_image = build_images.build_z80_image(cls.z80_system, cls.bios)
+        cls.package = build_images.build_boot_package(cls.z80_image)
+
+        generated_path = (
+            build_images.REPO_ROOT
+            / "src"
+            / "disks"
+            / "native"
+            / "drive_a_cpm63k.img"
+        )
+        cls.generated_drive = generated_path.read_bytes()
+        cls.native_drive = build_images.build_native_drive(
+            cls.generated_drive, cls.z80_system, cls.bios
+        )
+
+    def test_boot_package_header_and_memory_map(self) -> None:
+        header = self.package[: build_images.BOOT_HEADER_BYTES]
+        magic, version, header_bytes, image_bytes, image_crc, header_crc = (
+            struct.unpack("<IHHIII", header)
+        )
+        self.assertEqual(magic, build_images.BOOT_MAGIC)
+        self.assertEqual(version, build_images.BOOT_VERSION)
+        self.assertEqual(header_bytes, len(header))
+        self.assertEqual(image_bytes, build_images.Z80_IMAGE_BYTES)
+        self.assertEqual(
+            image_crc, binascii.crc32(self.z80_image) & 0xFFFFFFFF
+        )
+        self.assertEqual(header_crc, binascii.crc32(header[:16]) & 0xFFFFFFFF)
+        self.assertEqual(
+            self.package[build_images.BOOT_PAYLOAD_OFFSET :], self.z80_image
+        )
+        self.assertEqual(
+            self.package[
+                build_images.BOOT_HEADER_BYTES : build_images.BOOT_PAYLOAD_OFFSET
+            ],
+            bytes([0xFF])
+            * (build_images.BOOT_PAYLOAD_OFFSET - build_images.BOOT_HEADER_BYTES),
+        )
+
+        reset = bytes(
+            (
+                0xC3,
+                build_images.BIOS_BASE & 0xFF,
+                build_images.BIOS_BASE >> 8,
+            )
+        )
+        self.assertEqual(self.z80_image[:3], reset)
+        self.assertEqual(
+            self.z80_image[build_images.CCP_BASE : build_images.BIOS_BASE],
+            self.z80_system,
+        )
+        self.assertEqual(self.z80_system[0], 0xC3)
+        self.assertEqual(self.z80_system[0x801], 22)
+        self.assertIn(self.z80_system[0x806], (0x18, 0xC3))
+        self.assertEqual(
+            self.z80_image[
+                build_images.BIOS_BASE : build_images.BIOS_BASE + len(self.bios)
+            ],
+            self.bios,
+        )
+
+    def test_banked_ccp_launches_through_runtime_reset(self) -> None:
+        system = build_images.build_banked_cpm_system("z80asm")
+        launch = self.z80_system[:0x800].index(b"\xCD\x00\x01")
+        self.assertEqual(system[launch:launch + 3], b"\xCD\x68\xFB")
+        self.assertEqual(system[:launch], self.z80_system[:launch])
+        self.assertEqual(system[launch + 3:0x800], self.z80_system[launch + 3:0x800])
+        trampoline = build_images.build_bank_trampoline("z80asm")
+        self.assertEqual(system[0x1540:0x1580], trampoline)
+        self.assertEqual(trampoline[0x28:0x2E], b"\xF5\xC5\xD5\xE5\x1E\x0A")
+
+    def test_boot_package_rejects_incomplete_or_wrong_reset_image(self) -> None:
+        for size in (0, 1, 65535, 65537):
+            with self.subTest(size=size):
+                with self.assertRaisesRegex(ValueError, "exactly 65536"):
+                    build_images.build_boot_package(bytes(size))
+        with self.assertRaisesRegex(ValueError, "reset vector"):
+            build_images.build_boot_package(bytes(65536))
+        system = bytearray(self.z80_system)
+        system[-1] = 1
+        with self.assertRaisesRegex(ValueError, "reserved BDOS padding"):
+            build_images.build_z80_image(bytes(system), self.bios)
+
+    def test_native_drive_only_replaces_system_tracks(self) -> None:
+        system = self.z80_system + self.bios
+        self.assertEqual(self.native_drive[: len(system)], system)
+        self.assertEqual(
+            self.native_drive[len(system) : build_images.AUTORUN_OFFSET],
+            bytes([0xE5]) * (build_images.AUTORUN_OFFSET - len(system)),
+        )
+        self.assertEqual(
+            self.native_drive[build_images.AUTORUN_OFFSET : build_images.SYSTEM_BYTES],
+            build_images.autorun_record(),
+        )
+        self.assertEqual(
+            self.native_drive[build_images.SYSTEM_BYTES :],
+            self.generated_drive[build_images.SYSTEM_BYTES :],
+        )
+        self.assertEqual(len(self.native_drive), build_images.DISK_IMAGE_BYTES)
+
+    def test_autorun_record_abi(self) -> None:
+        self.assertEqual(build_images.AUTORUN_RECORD, 63)
+        self.assertEqual(build_images.AUTORUN_OFFSET, 0x1F80)
+        for mode in range(4):
+            record = build_images.autorun_record(mode, "c:date")
+            self.assertEqual(len(record), 128)
+            self.assertEqual(record[:12], b"ZAR1" + bytes((mode, 6)) + b"C:DATE")
+            self.assertEqual(sum(record) & 0xFF, 0)
+        self.assertEqual(build_images.autorun_record(1, "x" * 80)[5], 80)
+        for mode, command in ((-1, ""), (4, ""), (1, ""), (1, "x" * 81), (1, "\r")):
+            with self.subTest(mode=mode, command=command):
+                with self.assertRaises(ValueError):
+                    build_images.autorun_record(mode, command)
+        with self.assertRaisesRegex(ValueError, "overlap"):
+            build_images.build_native_drive(
+                self.generated_drive, self.z80_system, bytes(2561)
+            )
+
+    def test_autorun_installation_preserves_other_files(self) -> None:
+        cpmcp = shutil.which("cpmcp")
+        assembler = shutil.which("z80asm")
+        if cpmcp is None or assembler is None:
+            self.skipTest("cpmtools and z80asm are required")
+        utility = build_images.build_autorun(assembler)
+        installed = build_images.install_autorun(self.native_drive, utility, cpmcp)
+        self.assertEqual(installed[:build_images.SYSTEM_BYTES],
+                         self.native_drive[:build_images.SYSTEM_BYTES])
+        self.assertEqual(len(installed), build_images.DISK_IMAGE_BYTES)
+        directory = installed[
+            build_images.SYSTEM_BYTES:build_images.SYSTEM_BYTES + 2048
+        ]
+        entries = [directory[offset:offset + 32] for offset in range(0, 2048, 32)]
+        program_entries = [
+            entry for entry in entries
+            if entry[0] == 0 and entry[1:12] == b"AUTORUN COM"
+        ]
+        self.assertEqual(len(program_entries), 1)
+        entry = program_entries[0]
+        self.assertEqual(entry[12], 0)
+        self.assertEqual(entry[14], 0)
+        self.assertEqual(entry[15], (len(utility) + 127) // 128)
+        program = b"".join(
+            installed[build_images.SYSTEM_BYTES + block * 2048:
+                      build_images.SYSTEM_BYTES + (block + 1) * 2048]
+            for block in entry[16:24] if block
+        )
+        self.assertEqual(program[:len(utility)], utility)
+
+        def files(disk: bytes) -> dict[tuple[int, bytes, int, int], bytes]:
+            result = {}
+            for offset in range(build_images.SYSTEM_BYTES,
+                                build_images.SYSTEM_BYTES + 2048, 32):
+                entry = disk[offset:offset + 32]
+                if entry[0] == 0xE5:
+                    continue
+                name = bytes(value & 0x7F for value in entry[1:12])
+                if entry[0] == 0 and name == b"AUTORUN COM":
+                    continue
+                data = b"".join(
+                    disk[build_images.SYSTEM_BYTES + block * 2048:
+                         build_images.SYSTEM_BYTES + (block + 1) * 2048]
+                    for block in entry[16:24] if block
+                )
+                result[(entry[0], name, entry[12], entry[14])] = entry + data
+            return result
+
+        self.assertEqual(files(installed), files(self.native_drive))
+        self.assertEqual(
+            build_images.install_autorun(installed, utility, cpmcp), installed
+        )
+
+    def test_example_install_replaces_stale_and_removes_retired_files(self) -> None:
+        cpmcp = shutil.which("cpmcp")
+        if cpmcp is None:
+            self.skipTest("cpmtools is required")
+        stale = build_images.install_files(
+            self.native_drive, {"MEMPERF.COM": b"old"}, (), cpmcp
+        )
+        stale = build_images.install_files(
+            stale, {"SPREADS.COM": b"old"}, (), cpmcp
+        )
+        files = build_images.example_files()
+        self.assertIn("MEMPERF.COM", files)
+        fresh = build_images.install_files(
+            stale, files, build_images.EXAMPLE_REMOVED_FILES, cpmcp
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            (temporary / "diskdefs").write_text(
+                build_images.cpm_diskdefs(), encoding="ascii"
+            )
+            image = temporary / "drive.img"
+            image.write_bytes(fresh)
+            environment = {**os.environ,
+                           "DISKDEFS": str(temporary / "diskdefs")}
+            listing = subprocess.run(
+                [cpmcp.replace("cpmcp", "cpmls"), "-f", "z80sbc", str(image)],
+                cwd=temporary, env=environment, check=True,
+                capture_output=True, text=True,
+            ).stdout
+            self.assertNotIn("spreads.com", listing)
+            subprocess.run(
+                [cpmcp, "-f", "z80sbc", str(image), "0:MEMPERF.COM", "out.com"],
+                cwd=temporary, env=environment, check=True,
+            )
+            self.assertEqual((temporary / "out.com").read_bytes(),
+                             files["MEMPERF.COM"])
+
+    def test_cpm_and_disk_geometry(self) -> None:
+        self.assertEqual(
+            build_images.CPM_SYSTEM_RECORDS * build_images.RECORD_BYTES,
+            build_images.BIOS_BASE - build_images.CCP_BASE,
+        )
+        self.assertEqual(build_images.CCP_BASE, 0xE600)
+        self.assertEqual(build_images.BDOS_ENTRY, 0xEE06)
+        self.assertEqual(build_images.BIOS_BASE, 0xFC00)
+        self.assertEqual(
+            divmod(
+                build_images.CPM_SYSTEM_RECORDS,
+                build_images.SECTORS_PER_TRACK,
+            ),
+            (1, 12),
+        )
+        allocation_bytes = (build_images.DPB_DSM + 8) // 8
+        self.assertEqual(allocation_bytes, 32)
+        self.assertEqual(build_images.DPB_EXM, 0)
+
+        for left, right in zip(
+            build_images.FLASH_DISK_OFFSETS,
+            build_images.FLASH_DISK_OFFSETS[1:],
+        ):
+            self.assertEqual(left + build_images.DISK_IMAGE_BYTES, right)
+        self.assertEqual(
+            build_images.FLASH_DISK_OFFSETS[-1]
+            + build_images.DISK_IMAGE_BYTES,
+            build_images.FLASH_BYTES,
+        )
+
+    def test_bios_jump_table_abi(self) -> None:
+        jump_table_entries = 17
+        self.assertLessEqual(
+            len(self.bios), build_images.Z80_IMAGE_BYTES - build_images.BIOS_BASE
+        )
+        self.assertEqual(
+            self.bios[0 : jump_table_entries * 3 : 3],
+            bytes([0xC3]) * jump_table_entries,
+        )
+        self.assertEqual(self.bios[51:55], b"ZAR1")
+        self.assertEqual(
+            self.z80_system[build_images.BIOS_DIRECTORY_BUFFER - build_images.CCP_BASE:],
+            bytes(128),
+        )
+
+        def jump_target(entry: int) -> int:
+            offset = entry * 3
+            return self.bios[offset + 1] | (self.bios[offset + 2] << 8)
+
+        self.assertNotEqual(jump_target(5), jump_target(4))
+        self.assertEqual(jump_target(6), jump_target(5))
+        self.assertNotEqual(jump_target(7), jump_target(3))
+        self.assertEqual(self.bios[jump_target(5) - build_images.BIOS_BASE], 0xC9)
+        reader = jump_target(7) - build_images.BIOS_BASE
+        self.assertEqual(self.bios[reader : reader + 3], bytes((0x3E, 0x1A, 0xC9)))
+
+    def test_bios_extension_matches_assembly_and_generated_reference(self) -> None:
+        code = build_images.banked_transfer_code()
+        self.assertEqual(len(self.bios), 1024)
+        self.assertEqual(self.bios[0x300:0x300 + len(code)], code)
+        self.assertEqual(self.z80_image[0xFF00:0xFF00 + len(code)], code)
+        self.assertEqual(self.z80_image[0xFFF0:], bytes(16))
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "resident.bin"
+            subprocess.run([shutil.which("z80asm"), "-o", str(binary),
+                            str(build_images.REPO_ROOT / "src/common/banked_transfer.asm")],
+                           check=True)
+            self.assertEqual(binary.read_bytes(), code)
+        oversized = self.bios + bytes(1)
+        with self.assertRaisesRegex(ValueError, "complete bank extension"):
+            build_images.build_z80_image(self.z80_system, oversized)
+        tampered = bytearray(self.bios)
+        tampered[0x300] ^= 1
+        with self.assertRaisesRegex(ValueError, "differs from generated"):
+            build_images.build_z80_image(self.z80_system, bytes(tampered))
+
+    def test_cpm64_i8080_disassembly(self) -> None:
+        image = build_images.load_cpm_system()
+        instructions, targets = disassemble_cpm64.discover(image)
+        listing = disassemble_cpm64.emit_listing(image, instructions, targets)
+        report = "\n".join(disassemble_cpm64.audit(image, instructions)) + "\n"
+        self.assertEqual(
+            listing,
+            (build_images.REPO_ROOT / "src/cpm/cpm64_i8080.asm").read_text(
+                encoding="ascii"
+            ),
+        )
+        self.assertEqual(
+            report,
+            (build_images.REPO_ROOT / "src/cpm/cpm64_i8080_audit.md").read_text(
+                encoding="ascii"
+            ),
+        )
+
+        z80_source = disassemble_cpm64.emit_z80_port(
+            image, instructions, targets
+        )
+        self.assertEqual(
+            z80_source,
+            build_images.CPM_Z80_SOURCE_PATH.read_text(encoding="ascii"),
+        )
+
+    def test_z80_port_translation_and_layout(self) -> None:
+        instructions, targets = disassemble_cpm64.discover(self.cpm_system)
+        baseline_source = disassemble_cpm64.emit_z80_port(
+            self.cpm_system, instructions, targets, optimize=False
+        )
+        assembler = shutil.which("z80asm")
+        assert assembler is not None
+        self.assertEqual(
+            build_images.assemble_cpm_source(assembler, baseline_source),
+            self.cpm_system,
+        )
+        self.assertEqual(len(self.z80_system), build_images.CPM_SYSTEM_BYTES)
+        self.assertNotEqual(self.z80_system, self.cpm_system)
+        self.assertEqual(self.z80_system[0x800:0x806], self.cpm_system[0x800:0x806])
+
+        relocated: dict[int, int] = {}
+        output_address = disassemble_cpm64.ACTIVE_ORIGIN
+        address = disassemble_cpm64.ORIGIN
+        relative_branches = []
+        djnz_branches = []
+        section_ends = {}
+        while address < disassemble_cpm64.BIOS_BASE:
+            if address == disassemble_cpm64.BDOS_BASE:
+                section_ends["ccp"] = output_address
+                output_address = disassemble_cpm64.ACTIVE_BDOS_BASE
+            relocated[address] = output_address
+            instruction = instructions.get(address)
+            if address in {0xEC59, 0xED37}:
+                # Removed printer echo and Ctrl+P toggle; retain label aliases.
+                address = {0xEC59: 0xEC62, 0xED37: 0xED48}[address]
+                continue
+            if address == 0xEC33:
+                # The active port omits the Ctrl+S pause handler.
+                address = 0xEC42
+                continue
+            if instruction is None:
+                size = 1
+            elif address == 0xE4A7:
+                relocated[0xE4AB] = output_address + 9
+                size = 17
+                address = 0xE4BA
+                output_address += size
+                continue
+            elif address == 0xE4BA:
+                size = 1
+            elif address == 0xE742:
+                size = 6
+                address = 0xE74B
+                output_address += size
+                continue
+            elif address == 0xEEEF:
+                # or a; ex de,hl; sbc hl,de; ex de,hl replaces the six
+                # single-byte 8080 opcodes (MOV/SUB/MOV/MOV/SBB/MOV) that
+                # computed DE = DE - HL by hand.
+                size = 5
+                sequence_address = address
+                for _ in range(6):
+                    sequence_address += instructions[sequence_address].size
+                address = sequence_address
+                output_address += size
+                continue
+            elif address == 0xEF3E:
+                # ld hl,F8C3H; ld b,(hl); ld a,(F8E3H); L_EF45: or a; rra;
+                # djnz L_EF45 relocates the loop counter from C to B (see
+                # disassemble_cpm64.py) to replace DCR C; JNZ with DJNZ.
+                relocated[0xEF45] = output_address + 7
+                size = 11
+                sequence_address = address
+                for _ in range(7):
+                    sequence_address += instructions[sequence_address].size
+                address = sequence_address
+                output_address += size
+                continue
+            elif address in disassemble_cpm64.DJNZ_SITES:
+                jump = instructions[address + instruction.size]
+                djnz_branches.append((instruction, jump.target))
+                size = 2
+                address += instruction.size + jump.size
+                output_address += size
+                continue
+            elif address in disassemble_cpm64.CONDITIONAL_TAIL_CALLS:
+                following_return = instructions[address + instruction.size]
+                size = 4
+                address += instruction.size + following_return.size
+                output_address += size
+                continue
+            elif address in disassemble_cpm64.SUB_TWO_SITES:
+                following_dcr = instructions[address + instruction.size]
+                size = 2
+                address += instruction.size + following_dcr.size
+                output_address += size
+                continue
+            elif address == 0xF113:
+                # jr c,L_F0FE inverts and fuses the branch-over-jump pair
+                # at F113/F116 into a single 2-byte relative branch.
+                following_jump = instructions[0xF116]
+                size = 2
+                address += instruction.size + following_jump.size
+                output_address += size
+                continue
+            elif address in disassemble_cpm64.THREADED_CONDITIONAL_JUMPS:
+                size = 3
+            elif address == 0xF4FB:
+                size = 0
+            elif address == 0xF0C3:
+                size = 0
+            elif address in {0xE55E, 0xF503}:
+                size = 1
+            elif (
+                instruction.flow in {"jump", "conditional_jump"}
+                and instruction.target is not None
+                and ((address < disassemble_cpm64.BDOS_BASE)
+                     == (instruction.target < disassemble_cpm64.BDOS_BASE))
+                and -128 <= instruction.target - (address + 2) <= 127
+                and (
+                    instruction.flow == "jump"
+                    or instruction.mnemonic[1:] in {"NZ", "Z", "NC", "C"}
+                )
+            ):
+                size = 2
+                relative_branches.append(instruction)
+            else:
+                size = instruction.size
+            output_address += size
+            address += instruction.size if instruction is not None else 1
+        section_ends["bdos"] = output_address
+
+        jr_opcodes = {
+            "JMP": 0x18,
+            "JNZ": 0x20,
+            "JZ": 0x28,
+            "JNC": 0x30,
+            "JC": 0x38,
+        }
+        for instruction in relative_branches:
+            source = relocated[instruction.address]
+            offset = source - disassemble_cpm64.ACTIVE_ORIGIN
+            self.assertEqual(self.z80_system[offset], jr_opcodes[instruction.mnemonic])
+            displacement = int.from_bytes(
+                self.z80_system[offset + 1 : offset + 2],
+                byteorder="little",
+                signed=True,
+            )
+            self.assertEqual(
+                source + 2 + displacement,
+                relocated[instruction.target],
+                f"JR target mismatch for {instruction.address:04X}",
+            )
+
+        self.assertEqual(
+            disassemble_cpm64.ACTIVE_BDOS_BASE - section_ends["ccp"], 109
+        )
+        # CLEAR occupies reclaimed padding without relocating the original CCP
+        # or reducing the TPA. Its BDOS string must retain both ESC bytes.
+        clear_start = section_ends["ccp"] - disassemble_cpm64.ACTIVE_ORIGIN
+        clear_end = clear_start + 55
+        self.assertEqual(
+            self.z80_system[clear_end - 19 : clear_end],
+            b"CLEAR      \x1b[2J\x1b[H$",
+        )
+        self.assertEqual(self.z80_system[clear_end:0x800], bytes(54))
+        self.assertEqual(
+            disassemble_cpm64.ACTIVE_BIOS_BASE - section_ends["bdos"], 192
+        )
+        self.assertEqual(len(djnz_branches), len(disassemble_cpm64.DJNZ_SITES))
+        for instruction, target in djnz_branches:
+            source = relocated[instruction.address]
+            offset = source - disassemble_cpm64.ACTIVE_ORIGIN
+            self.assertEqual(self.z80_system[offset], 0x10)
+            displacement = int.from_bytes(
+                self.z80_system[offset + 1 : offset + 2], byteorder="little", signed=True
+            )
+            self.assertEqual(source + 2 + displacement, relocated[target])
+
+        subtraction = relocated[0xEEEF] - disassemble_cpm64.ACTIVE_ORIGIN
+        self.assertEqual(
+            self.z80_system[subtraction : subtraction + 5],
+            bytes((0xB7, 0xEB, 0xED, 0x52, 0xEB)),
+        )
+        counter_relocation = relocated[0xEF3E] - disassemble_cpm64.ACTIVE_ORIGIN
+        block = self.z80_system[counter_relocation : counter_relocation + 11]
+        self.assertEqual(block[0], 0x21)  # ld hl,nn
+        self.assertEqual(block[3], 0x46)  # ld b,(hl)
+        self.assertEqual(block[4], 0x3A)  # ld a,(nn)
+        self.assertEqual(block[7:10], bytes((0xB7, 0x1F, 0x10)))  # or a; rra; djnz
+        djnz_displacement = int.from_bytes(block[10:11], byteorder="little", signed=True)
+        self.assertEqual(
+            relocated[0xEF3E] + 11 + djnz_displacement, relocated[0xEF45]
+        )
+        for address in disassemble_cpm64.SUB_TWO_SITES:
+            offset = relocated[address] - disassemble_cpm64.ACTIVE_ORIGIN
+            self.assertEqual(self.z80_system[offset : offset + 2], bytes((0xD6, 0x02)))
+        branch_inversion = relocated[0xF113] - disassemble_cpm64.ACTIVE_ORIGIN
+        self.assertEqual(self.z80_system[branch_inversion], 0x38)
+        displacement = int.from_bytes(
+            self.z80_system[branch_inversion + 1 : branch_inversion + 2], byteorder="little", signed=True
+        )
+        self.assertEqual(
+            relocated[0xF113] + 2 + displacement,
+            relocated[0xF0FE],
+        )
+
+        copy = relocated[0xE742] - disassemble_cpm64.ACTIVE_ORIGIN
+        self.assertEqual(
+            self.z80_system[copy : copy + 6],
+            bytes((0x48, 0x06, 0x00, 0xED, 0xB0, 0xC9)),
+        )
+        for address, target in disassemble_cpm64.THREADED_CONDITIONAL_JUMPS.items():
+            offset = relocated[address] - disassemble_cpm64.ACTIVE_ORIGIN
+            opcode = 0xCA if instructions[address].mnemonic == "JZ" else 0xC2
+            self.assertEqual(self.z80_system[offset], opcode)
+            destination = int.from_bytes(
+                self.z80_system[offset + 1 : offset + 3], byteorder="little"
+            )
+            self.assertEqual(destination, relocated[target])
+
+        for address in disassemble_cpm64.CONDITIONAL_TAIL_CALLS:
+            offset = relocated[address] - disassemble_cpm64.ACTIVE_ORIGIN
+            self.assertEqual(self.z80_system[offset : offset + 2], bytes((0xC0, 0xC3)))
+
+        for instruction in instructions.values():
+            if (0xEC59 <= instruction.address < 0xEC62 or
+                    0xED37 <= instruction.address < 0xED48):
+                continue  # Removed printer echo and toggle.
+            if 0xEC33 <= instruction.address < 0xEC42:
+                continue  # Removed Ctrl+S handler.
+            if (instruction.target is None or
+                    not disassemble_cpm64.BIOS_BASE <= instruction.target <=
+                    disassemble_cpm64.BIOS_BASE + 0x30):
+                continue
+            offset = relocated[instruction.address] - disassemble_cpm64.ACTIVE_ORIGIN
+            destination = int.from_bytes(
+                self.z80_system[offset + 1 : offset + 3], byteorder="little"
+            )
+            self.assertEqual(
+                destination,
+                disassemble_cpm64.ACTIVE_BIOS_BASE
+                + instruction.target - disassemble_cpm64.BIOS_BASE,
+            )
+
+        for table_address, count in (
+            disassemble_cpm64.CCP_COMMAND_TABLE,
+            disassemble_cpm64.BDOS_ERROR_TABLE,
+            disassemble_cpm64.BDOS_FUNCTION_TABLE,
+        ):
+            output = relocated[table_address] - disassemble_cpm64.ACTIVE_ORIGIN
+            for index, target in enumerate(
+                disassemble_cpm64.table_targets(
+                    self.cpm_system, table_address, count
+                )
+            ):
+                actual = int.from_bytes(
+                    self.z80_system[output + index * 2 : output + index * 2 + 2],
+                    byteorder="little",
+                )
+                expected = relocated.get(target)
+                if expected is None and disassemble_cpm64.BIOS_BASE <= target <= disassemble_cpm64.BIOS_BASE + 0x30:
+                    expected = disassemble_cpm64.ACTIVE_BIOS_BASE + target - disassemble_cpm64.BIOS_BASE
+                if expected is None:
+                    expected = target
+                self.assertEqual(
+                    actual,
+                    expected,
+                    f"relocated table target mismatch at {table_address + index * 2:04X}",
+                )
+
+        workspace_pointer = relocated[0xE388] - disassemble_cpm64.ACTIVE_ORIGIN
+        self.assertEqual(
+            int.from_bytes(
+                self.z80_system[workspace_pointer : workspace_pointer + 2],
+                byteorder="little",
+            ),
+            relocated[0xE308],
+        )
+        for site, target, opcode in (
+            (0xE6D2, 0xE300, 0x22),
+            (0xEBEE, 0xEBC6, 0x32),
+        ):
+            offset = relocated[site] - disassemble_cpm64.ACTIVE_ORIGIN
+            self.assertEqual(self.z80_system[offset], opcode)
+            self.assertEqual(
+                int.from_bytes(
+                    self.z80_system[offset + 1 : offset + 3], byteorder="little"
+                ),
+                relocated[target],
+            )
+
+    def test_i8080_decoder_opcode_coverage(self) -> None:
+        image = bytes(range(256)) + bytes((0, 0))
+        for opcode in range(256):
+            instruction = disassemble_cpm64.decode(image, disassemble_cpm64.ORIGIN + opcode)
+            if opcode in disassemble_cpm64.UNOFFICIAL_8080:
+                self.assertEqual(instruction.flow, "unofficial")
+            else:
+                self.assertNotEqual(instruction.flow, "unofficial")
+
+        with self.assertRaisesRegex(ValueError, "truncated instruction"):
+            disassemble_cpm64.decode(bytes((0xC3,)), disassemble_cpm64.ORIGIN)
+
+    def test_i8080_audit_rejects_wrong_fingerprint(self) -> None:
+        image = bytearray(build_images.load_cpm_system())
+        image[-1] ^= 1
+        instructions, _ = disassemble_cpm64.discover(image)
+        with self.assertRaisesRegex(ValueError, "SHA-256"):
+            disassemble_cpm64.audit(image, instructions)
+
+    def test_boot_package_cannot_overlap_environment(self) -> None:
+        package = b"\xff" * (
+            build_images.FLASH_ENV_OFFSET - build_images.FLASH_BOOT_OFFSET + 1
+        )
+        with self.assertRaisesRegex(ValueError, "environment"):
+            build_images.build_flash_image(
+                b"firmware", package,
+                [self.native_drive] * build_images.DRIVE_COUNT,
+            )
+
+    def test_complete_flash_requires_exactly_four_disks(self) -> None:
+        for count in (0, 3, 5):
+            with self.subTest(count=count), self.assertRaisesRegex(ValueError, "four disks"):
+                build_images.build_flash_image(
+                    b"firmware", self.package, [self.native_drive] * count
+                )
+
+    def test_complete_flash_layout(self) -> None:
+        firmware = b"stage10"
+        disks = [self.native_drive] * build_images.DRIVE_COUNT
+        flash = build_images.build_flash_image(firmware, self.package, disks)
+        self.assertEqual(len(flash), build_images.FLASH_BYTES)
+        self.assertEqual(flash[: len(firmware)], firmware)
+        self.assertEqual(
+            flash[build_images.FLASH_ENV_OFFSET:
+                  build_images.FLASH_ENV_OFFSET + build_images.FLASH_ENV_BYTES],
+            b"\xff" * build_images.FLASH_ENV_BYTES,
+        )
+        self.assertEqual(
+            flash[
+                build_images.FLASH_JOURNAL_OFFSET : build_images.FLASH_BOOT_OFFSET
+            ],
+            bytes([0xFF]) * build_images.FLASH_JOURNAL_BYTES,
+        )
+        self.assertEqual(
+            flash[
+                build_images.FLASH_BOOT_OFFSET :
+                build_images.FLASH_BOOT_OFFSET + len(self.package)
+            ],
+            self.package,
+        )
+        for offset in build_images.FLASH_DISK_OFFSETS:
+            self.assertEqual(
+                flash[offset : offset + len(self.native_drive)],
+                self.native_drive,
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

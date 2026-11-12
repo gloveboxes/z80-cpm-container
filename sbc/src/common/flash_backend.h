@@ -1,0 +1,27 @@
+#ifndef Z80SBC_FLASH_BACKEND_H
+#define Z80SBC_FLASH_BACKEND_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#include "z80sbc/flash_disk.h"
+
+bool z80_flash_backend_init(void);
+bool z80_flash_backend_init_observed(z80_boot_observer_t observer,
+                                     void *context);
+void z80_flash_backend_core0_service(void);
+/* Core 0 trap: the caller has validated drive and lba; copies one record. */
+void z80_flash_backend_read_record(unsigned int drive, uint16_t lba,
+                                   uint8_t *data);
+bool z80_flash_backend_write_record(unsigned int drive, uint16_t lba,
+                                    const uint8_t *data, size_t length,
+                                    uint8_t write_type);
+bool z80_flash_backend_flush(void);
+bool z80_flash_backend_flush_due(void);
+bool z80_flash_backend_quiescent(void);
+void z80_flash_backend_arm_fault(z80_flash_fault_point_t point);
+/* Core 1 only: uses the same BUSACK/flash-safe handshake as disk writes. */
+bool z80_flash_backend_env_write(unsigned slot, const uint8_t *sector);
+
+#endif

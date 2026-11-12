@@ -1,0 +1,245 @@
+# Native CP/M boot image
+
+The board runs a 64K CP/M 2.2 system generated from the files on
+`src/disks/native/drive_a_cpm63k.img`, but replaces its Altair controller BIOS.
+The memory map is:
+
+| Region | Z80 address | Size |
+| --- | ---: | ---: |
+| CCP | `0xE600` | 2,048 bytes |
+| BDOS | `0xEE00` | 3,584 bytes |
+| BIOS core | `0xFC00` | 766 bytes currently |
+| BIOS bank extension | `0xFF00` | 256-byte reserved page, included in bios.bin |
+
+The checked-in `cpm64_system.bin` was captured from RAM after the matching
+Burcon `MOVCPM 64` and `SYSGEN` utilities produced and booted a 64K system. It
+contains the 44 relocated CCP/BDOS records and is protected by a SHA-256 check
+in `build_images.py`. The active port relocates page zero's BDOS entry to
+`0xEE06`, and the custom BIOS jump table begins at `0xFC00`. The TPA is
+`0x0100`-`0xE5FF` (58,624 bytes). The resident banked transfer service occupies
+`0xFF00`-`0xFFFF`, outside the TPA; bank 1 uses the same page for its mirrored
+BIOS extension. All CCP, BDOS, and BIOS workspace remains inside the resident
+regions above the TPA.
+
+The complete `bios.bin` is 1,024 bytes including padding and the bank extension.
+The standard 17-entry jump table is unchanged; [BIOS bank extension ABI 1.0](../../docs/docs/en/system/cpm-execution.md#banked-memory-bios-extension-abi-10)
+provides READ/WRITE/INFO/HEAP calls for portable clients. The assembly is
+included directly by `z80_bios.asm`, and generated supervisor bytes are checked
+against that BIOS page during packaging.
+
+The built-in `CLEAR` command sends `ESC[2J` followed by `ESC[H` to clear a
+VT100/ANSI terminal and move the cursor home. It uses 55 bytes of reclaimed
+CCP padding, leaving 54 bytes free; the image size and TPA are unchanged.
+Command input is case-insensitive. `CLEARX` and `CLEAR.COM` continue through
+the normal transient-program lookup.
+
+`disassemble_cpm64.py` recursively disassembles the exact fingerprinted image
+from the CCP vectors and all indirect CCP/BDOS dispatch tables. It generates
+`cpm64_i8080.asm` with Intel 8080 mnemonics and leaves unvisited strings,
+tables, and workspace as byte data. See `cpm64_i8080_audit.md` for the
+correctness and optimization review. The boot-proven `cpm64_system.bin` remains
+immutable. The builder instead assembles the generated `cpm64_z80.asm` port.
+Its unoptimized generation mode reproduces the immutable image byte-for-byte.
+The active port combines relative branches, ten guarded `DJNZ` sites, `LDIR`,
+native `SBC HL,DE` subtraction, `SUB 2` fusion, a branch inversion, branch
+threading, tail transfers, and register-use rewrites to reclaim 263 bytes while
+preserving the fixed section sizes. Discovery includes
+the BDOS cleanup block reached through a synthetic stack return. Host tests
+independently verify relocation and native encodings; `test_z80_debug_host.py`
+boots the optimized image, runs `DIR`, loads a real transient program to its
+natural exit, and verifies that BIOS warm boot reloads CP/M and restores the
+prompt through the modeled SBC ports. The Z80 debug host's DCC-derived
+`FullCpmHost` model
+reports a benign `exited-normally` checkpoint whenever the emulated PC
+coincidentally equals `0x0000` or a bootstrap-captured address, even during
+completely ordinary execution; the test resumes past it (occasionally dozens
+of times, for a single coincidentally-aliased loop) rather than treating it as
+a failure.
+
+Use the matching
+[Burcon CP/M 2.2 utilities](https://deramp.com/downloads/altair/software/8_inch_floppy/CPM/CPM%202.2/Burcon%20CPM/)
+when reproducing this artifact: run that archive's `MOVCPM.COM` and
+`SYSGEN.COM` as described in its
+[Using MOVCPM guide](https://deramp.com/downloads/altair/software/8_inch_floppy/CPM/CPM%202.2/Burcon%20CPM/Using%20MOVCPM.pdf).
+Burcon reserves `0x0700` bytes for its BIOS and reports `SAVE 38` after
+`MOVCPM 64`. Those reference addresses remain the input to the audit and
+byte-identical unoptimized mode. The active SBC port symbolically relocates the
+same fixed-size sections upward by `0x0400`.
+
+`z80_bios.asm` is assembled at `0xFC00`. It uses terminal data/status ports
+`0x00`/`0x01` and disk command, drive, LBA-low, LBA-high, and data ports
+`0x10`-`0x14`. Warm boot reloads 44 sequential records from native Drive A.
+The BIOS reports `B0h` on reserved port `0x05` at cold entry and `C0h`
+immediately before handing control to CCP, including warm boot. These reports
+prove execution milestones, not a usable prompt. Phase 9 exposes CP/M over
+USB CDC at nominal 20 MHz after explicit slow load/verification and start
+commands; Stage 10 retains its separate network transport and 1 MHz default.
+The source deliberately uses the Z80 instruction set, including `DJNZ`,
+relative branches, rotate/carry status polling, carry-to-mask `SBC A,A`, and
+`INIR`/`OTIR` block I/O; it is not restricted to the 8080-compatible subset.
+`read_record` and `write_record` bank BC/DE/HL through the alternate register
+set with a single `EXX` each way instead of three `PUSH`/`POP` pairs; this is
+safe because this system never enables interrupts anywhere, so the shadow
+registers have no other owner. `write_record`'s write-type selector is read
+from `C` into `A` and stashed in memory before the `EXX`, since it is a real
+input parameter (not just a value to preserve) and `A` does not survive the
+following `prepare_disk_io` call. This trades 4 extra BIOS bytes (`write_record`
+now stashes its command byte through memory) for roughly half the T-states of
+the previous `PUSH`/`POP` sequence on every disk operation.
+The BIOS uses an identity `SECTRAN` because disk conversion has already removed
+the Altair skew. It forwards CP/M's standard write type to the Pico so normal
+writes can be coalesced in a 4 KiB cache, while directory writes and warm boot
+flush through the journal. A 250 ms idle deadline also persists an isolated
+normal overwrite. `LIST`, `PUNCH`, and `READER` remain in their mandatory
+jump-table positions, but no devices are implemented: printer and punch output
+is discarded, reader input returns CP/M text EOF (`0x1A`), and `LISTST` reports
+not ready. The existing aligned
+console (`0x00`) and disk (`0x10`) port groups are retained for direct-I/O
+compatibility; changing their values would not reduce the number of I/O traps.
+
+Disk geometry lives once in `src/disks/geometry.py`. The host builder converts
+it to assembler equates, assembles the BIOS, builds the reset-ready SRAM image,
+adds the firmware manifest and CRCs, replaces Drive A's reserved tracks, and
+optionally composes the complete 4 MiB flash image.
+
+```sh
+python3 src/cpm/build_images.py --output-dir build/cpm
+```
+
+The boot packer rejects incomplete images and a reset vector other than
+`JP FC00h`; firmware independently checks the same shape and both CRCs.
+`z80_stage09_cpm_images` generates a complete Stage 9 provisioning set in
+`build/cpm-stage09/`; `z80_cpm_images` retains Stage 10 in `build/cpm/`.
+Use a matching boot package and Drive A system image after BIOS changes. The
+current loader mirrors the validated image's FF00h page into bank 1 rather
+than embedding a second routine in firmware. After upgrading to this loader,
+compatible BIOS code changes do not require another firmware flash.
+
+## Native auto-run
+
+The builder requires Python 3.9+, `z80asm`, and `cpmtools` (`cpmcp` and
+`cpmrm`). It produces `AUTORUN.COM` and replaces the old Altair utility in
+user 0 on the generated native drive A. Other files and drives are preserved.
+Provision a **matching boot package and native drive A** to install this
+feature; copying the utility alone does not upgrade the BIOS. No changes to
+the Pico disk protocol or flash layout are required.
+
+Run `AUTORUN` at the CP/M prompt. Choose cold boot only, warm boot only,
+both, or disabled. RETURN keeps the current mode or command; `Q` at the
+mode prompt quits without writing. Commands are printable ASCII, at most
+80 characters, and saved in uppercase. For example, select `1`, then enter
+`C:DATE`. A cold-only command does not repeat when a transient invokes warm
+boot. Warm-only and both modes intentionally run on every actual BIOS warm
+boot, not merely every return to the CCP prompt.
+
+When an enabled command applies to a boot, **a pending console key bypasses
+that invocation**; the BIOS consumes the key. This also lets an operator
+escape a repeating warm-boot command and run `AUTORUN` to disable it.
+Disabled or inapplicable auto-run does not consume console input.
+
+Configuration is stored only on drive A, at zero-based track 1, sector 31
+(LBA 63, image offset `0x1F80`), the final 128-byte record of the two reserved
+system tracks. It is outside the CCP/BDOS/BIOS image and the filesystem:
+
+| Byte offset | Meaning |
+| --- | --- |
+| 0-3 | ASCII `ZAR1` (format version 1) |
+| 4 | Mode: 0 disabled, 1 cold, 2 warm, 3 both |
+| 5 | Command length, 0-80; enabled commands must be nonempty |
+| 6-85 | Command bytes; the length determines which bytes are used |
+| 86-126 | Reserved |
+| 127 | Additive checksum: the sum of all 128 bytes modulo 256 is zero |
+
+Freshly built drive A images initialize auto-run to disabled. Replacing the
+whole drive A image therefore resets its configuration. The utility writes
+with BIOS `C=1` to force a journaled flush, then reads back and compares the
+entire record before reporting success. It refuses a BIOS without the
+native signature at `FD33h`. Read, write, and verification failures are
+reported explicitly. The BIOS reports `AUTORUN config error` and continues
+to the prompt on a read failure or invalid header, checksum, mode, or length;
+an erased record beginning with `E5h` is treated as unconfigured.
+
+The BIOS clears the CCP command length on every boot, copies only an
+applicable command, appends NUL, and enters the CCP cold vector to retain
+that prepared line. Its 128-byte directory buffer occupies the optimized
+BDOS padding at `FB80h-FBFFh`, leaving the TPA unchanged. Generation and image
+packing guard this workspace against overlap; unoptimized reference images
+remain available for byte-identical assembly tests, not native BIOS boot.
+
+## Execution tests
+
+The C emulator used by the SRAM soak can also execute the actual BIOS,
+all-drive directory reads, transient exit/warm boot, native AUTORUN menu and
+writes, all four auto-run modes, keyboard bypass, error paths, and the
+read-only Z80 disk diagnostic:
+
+```sh
+python3.14 src/common/tests/cpm_boot_z80_test.py
+```
+
+This is host-model evidence, not physical 20 MHz or flash timing qualification.
+
+To run the end-to-end test with the project-owned `z80-debug-host`:
+
+```sh
+python3 src/cpm/test_z80_debug_host.py \
+  --host build/cpm/z80_debug_host/z80-debug-host
+```
+
+For a self-contained test that uses the vendored current DCC Z80 engine, build
+the local host described in
+[`z80_debug_host/README.md`](z80_debug_host/README.md), then pass its executable
+with `--host`. The Python test extracts the SRAM payload from `z80boot.pkg`
+instead of loading a separate boot-image artifact.
+
+To interact with CP/M in the emulator, select **Interactive CP/M emulator** in
+VS Code's **Run and Debug** view and press Start. `launch.py` first builds the
+local host, banked examples and CP/M images; it then loads the payload
+from `z80boot.pkg` and connects the integrated terminal to the emulated CP/M
+console. Wait for `A>`, then type commands normally; `DIR`, `LS`, `C:`,
+`ATTNC11`, and cross-drive `PIP` copies provide progressively broader checks of
+CCP, BDOS, BIOS warm boot, multi-extent loading, and disk writes. `Ctrl+]`
+detaches from the terminal and stops the session.
+
+The pre-launch task builds the complete project-owned
+[`dcc_io_adapter/`](dcc_io_adapter/) shared library and the debug configuration
+always loads it. In addition to the SBC disk ports, it mirrors all active ports
+in the ESP32 Altair `port_drivers` dispatcher for time, utility, weather,
+interrupt timer, file transfer, environment, chat, and shared response data.
+Its terminal pipeline translates cursor, Insert/Delete, and Page Up/Page Down
+ANSI sequences to the CP/M control keys, maps Backspace/Delete to Ctrl-H, and
+preserves standalone Escape after a 30 ms sequence timeout. See
+[interactive-test documentation](../../docs/docs/en/cpm-dcc/interactive.md) for the
+complete procedure, expected results, and the boundary between emulator
+coverage and Pico/physical-board qualification.
+
+The project `z80-debug-host` must implement DD/FD-prefixed opcodes that don't
+reference `H`/`L`/`(HL)` as executing exactly as if unprefixed (the real Z80
+behavior); a build missing this aborts with `bugbug: not-implemented z80
+instruction` on some historical `.COM` files. It is fixed in `x80.cxx`'s
+`z80_execute_unprefixed`, alongside two related pre-existing mask bugs found
+while diagnosing it (`ld r,(i+d)` and IXH/IXL math wrongly also matching ALU
+immediates and register B/C forms respectively); see `z80_core_test.cpp` for
+the regression coverage.
+
+`z80boot.pkg` has a 20-byte little-endian manifest at offset zero, `0xFF`
+padding through offset `0x0FFF`, and a 65,536-byte SRAM image at offset
+`0x1000`. The SRAM image starts with `JP 0xFC00`; cold boot then installs the
+normal CP/M warm-boot and BDOS vectors before entering the CCP.
+
+## 512 KiB disk layout
+
+Each native disk has 128 tracks of 32 × 128-byte records. Two system tracks
+leave 252 allocation blocks of 2 KiB (`DSM=251`); one block holds the 64-entry
+directory, leaving 502 KiB for files. Each drive has a 32-byte allocation map.
+The Pico still caches one 4 KiB erase block at a time.
+
+To fit the larger maps in the `0xFC00`–`0xFEFF` BIOS region, cold boot
+and configuration errors share a string printer, the startup banner is shortened,
+and warm boot reads its 44 system records using a linear sector index on track 0.
+The public BIOS disk addressing and the TPA remain unchanged.
+
+The flash layout reserves firmware below `0x1D0000`, journal at `0x1D0000`,
+boot at `0x1E0000`, environment at `0x1FE000`, and four 512 KiB drives starting
+at `0x200000`, `0x280000`, `0x300000`, and `0x380000`. Every native drive image
+is exactly 512 KiB, matching the host emulator and the images in `src/disks/native/`.

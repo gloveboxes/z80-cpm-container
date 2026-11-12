@@ -1,0 +1,6 @@
+.git
+.github
+build/
+runtime/altair_env.txt
+**/__pycache__/
+.DS_Store

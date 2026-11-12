@@ -1,0 +1,466 @@
+cmake_minimum_required(VERSION 3.20)
+project(z80_control_tests C CXX)
+enable_testing()
+find_program(PIOASM pioasm HINTS
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../../build/pioasm-install/pioasm")
+if(PIOASM)
+  set(display_generated_dir "${CMAKE_CURRENT_BINARY_DIR}/display")
+  file(MAKE_DIRECTORY "${display_generated_dir}")
+  add_custom_command(
+    OUTPUT "${display_generated_dir}/display_i2c.pio.h"
+    COMMAND "${PIOASM}" -o c-sdk -v 1
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../stage10_websocket_terminal/display_i2c.pio"
+      "${display_generated_dir}/display_i2c.pio.h"
+    DEPENDS ../../stage10_websocket_terminal/display_i2c.pio
+    VERBATIM)
+  add_executable(oled_display_test oled_display_test.cpp
+    "${display_generated_dir}/display_i2c.pio.h")
+  target_include_directories(oled_display_test PRIVATE
+    display_fakes "${display_generated_dir}" fakes ../include)
+  target_compile_features(oled_display_test PRIVATE cxx_std_17)
+  target_compile_options(oled_display_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  add_test(NAME oled_pio_SSD1315 COMMAND oled_display_test)
+  set_tests_properties(oled_pio_SSD1315 PROPERTIES TIMEOUT 5)
+  set(banked_pio_generated_dir "${CMAKE_CURRENT_BINARY_DIR}/banked-pio")
+  file(MAKE_DIRECTORY "${banked_pio_generated_dir}")
+  add_custom_command(
+    OUTPUT "${banked_pio_generated_dir}/banked_io.pio.h"
+    COMMAND "${PIOASM}" -o c-sdk
+      "${CMAKE_CURRENT_SOURCE_DIR}/../banked_io.pio"
+      "${banked_pio_generated_dir}/banked_io.pio.h"
+    DEPENDS ../banked_io.pio VERBATIM)
+  add_executable(banked_pio_test banked_pio_test.c
+    "${banked_pio_generated_dir}/banked_io.pio.h")
+  target_include_directories(banked_pio_test PRIVATE
+    pio_fakes "${banked_pio_generated_dir}" fakes ../include)
+  target_compile_features(banked_pio_test PRIVATE c_std_11)
+  target_compile_options(banked_pio_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  add_test(NAME banked_pio_driver COMMAND banked_pio_test)
+  set_tests_properties(banked_pio_driver PROPERTIES TIMEOUT 5)
+  add_executable(banked_pio_integration_test banked_pio_integration_test.c
+    "${banked_pio_generated_dir}/banked_io.pio.h")
+  target_include_directories(banked_pio_integration_test PRIVATE
+    pio_fakes "${banked_pio_generated_dir}" fakes ../include)
+  target_compile_definitions(banked_pio_integration_test PRIVATE
+    Z80_BANKED_PIO=1)
+  target_compile_features(banked_pio_integration_test PRIVATE c_std_11)
+  target_compile_options(banked_pio_integration_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  add_test(NAME banked_pio_console_handoff COMMAND banked_pio_integration_test)
+  set_tests_properties(banked_pio_console_handoff PROPERTIES TIMEOUT 5)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  add_test(NAME banked_pio_instruction_cycles COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/banked_pio_cycles_test.py"
+    --program "${banked_pio_generated_dir}/banked_io.pio.h")
+  set_tests_properties(banked_pio_instruction_cycles PROPERTIES TIMEOUT 120)
+else()
+  message(STATUS "Set PIOASM to enable the assembled PIO regressions")
+endif()
+add_executable(speaker_bridge_test speaker_bridge_test.cpp
+  ../../cpm/dcc_io_adapter/host/PortDrivers/speaker_io.c
+  ../../cpm/dcc_io_adapter/host/PortDrivers/speaker_audio.c)
+target_include_directories(speaker_bridge_test PRIVATE fakes ../include
+  ../../cpm/dcc_io_adapter/host
+  ../../stage11_extension_board/flash_ATTiny85
+  ../../stage11_extension_board/tests/fakes)
+target_compile_features(speaker_bridge_test PRIVATE c_std_11 cxx_std_17)
+target_compile_options(speaker_bridge_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+if(UNIX AND NOT APPLE)
+  target_link_libraries(speaker_bridge_test PRIVATE m)
+endif()
+add_test(NAME stage10_speaker_bridge COMMAND speaker_bridge_test)
+set_tests_properties(stage10_speaker_bridge PROPERTIES TIMEOUT 5)
+add_executable(io_ports_test io_ports_test.c ../io_ports.c ../io_service.c
+  ../http_io.c ../http_stream.c
+  ../chat.c ../chat_stream.c
+  ../weather.c ../../cpm/dcc_io_adapter/port_drivers/json_scan.c
+  ../environment_store.c
+  ../../cpm/dcc_io_adapter/host/PortDrivers/environment_io.c)
+target_include_directories(io_ports_test PRIVATE fakes ../include ..)
+target_compile_definitions(io_ports_test PRIVATE Z80_ENV_FLASH=1)
+target_compile_features(io_ports_test PRIVATE c_std_11)
+target_compile_options(io_ports_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME extended_io_services COMMAND io_ports_test)
+set_tests_properties(extended_io_services PROPERTIES TIMEOUT 30)
+add_executable(io_transport_test io_transport_test.c ../http_io.c ../http_stream.c)
+target_include_directories(io_transport_test PRIVATE ../include ..)
+target_compile_features(io_transport_test PRIVATE c_std_11)
+target_compile_options(io_transport_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME service_response_handoff COMMAND io_transport_test)
+set_tests_properties(service_response_handoff PROPERTIES TIMEOUT 5)
+add_executable(io_service_platform_test io_service_platform_test.c)
+target_include_directories(io_service_platform_test PRIVATE fakes ../include ..)
+target_compile_features(io_service_platform_test PRIVATE c_std_11)
+target_compile_options(io_service_platform_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME service_clock_and_info COMMAND io_service_platform_test)
+set_tests_properties(service_clock_and_info PROPERTIES TIMEOUT 5)
+add_executable(clock_service_test clock_service_test.c ../io_ports.c
+  ../http_io.c ../http_stream.c
+  ../chat.c ../chat_stream.c
+  ../weather.c ../../cpm/dcc_io_adapter/port_drivers/json_scan.c
+  ../io_service.c ../io_service_platform.c ../environment_store.c
+  ../../cpm/dcc_io_adapter/host/PortDrivers/environment_io.c)
+target_include_directories(clock_service_test PRIVATE fakes ../include ..)
+target_compile_definitions(clock_service_test PRIVATE Z80_ENV_FLASH=1)
+target_compile_features(clock_service_test PRIVATE c_std_11)
+target_compile_options(clock_service_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME clock_app_time_services COMMAND clock_service_test)
+set_tests_properties(clock_app_time_services PROPERTIES TIMEOUT 5)
+add_executable(weather_test weather_test.c ../weather.c ../weather_http.c
+  ../../cpm/dcc_io_adapter/port_drivers/json_scan.c)
+target_include_directories(weather_test PRIVATE ../include ..)
+target_compile_features(weather_test PRIVATE c_std_11)
+target_compile_options(weather_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME weather_cache_and_http COMMAND weather_test)
+set_tests_properties(weather_cache_and_http PROPERTIES TIMEOUT 5)
+add_executable(weather_network_test weather_network_test.cpp ../weather_http.c)
+target_include_directories(weather_network_test PRIVATE fakes ../include ..)
+target_compile_features(weather_network_test PRIVATE cxx_std_17)
+target_compile_options(weather_network_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME weather_async_https COMMAND weather_network_test)
+set_tests_properties(weather_async_https PROPERTIES TIMEOUT 5)
+add_executable(chat_stream_test chat_stream_test.c ../chat_stream.c)
+target_include_directories(chat_stream_test PRIVATE ../include ..)
+target_compile_features(chat_stream_test PRIVATE c_std_11)
+target_compile_options(chat_stream_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME chat_http_sse COMMAND chat_stream_test)
+set_tests_properties(chat_http_sse PROPERTIES TIMEOUT 5)
+add_executable(chat_network_test chat_network_test.cpp ../chat.c ../chat_stream.c)
+target_include_directories(chat_network_test PRIVATE fakes ../include ..)
+target_compile_features(chat_network_test PRIVATE cxx_std_17 c_std_11)
+target_compile_options(chat_network_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME chat_async_transport COMMAND chat_network_test)
+set_tests_properties(chat_async_transport PROPERTIES TIMEOUT 5)
+add_executable(http_io_test http_io_test.c ../http_io.c ../http_stream.c)
+target_include_directories(http_io_test PRIVATE ../include ..)
+target_compile_features(http_io_test PRIVATE c_std_11)
+target_compile_options(http_io_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME http_file_transfer_ports_and_parser COMMAND http_io_test)
+set_tests_properties(http_file_transfer_ports_and_parser PROPERTIES TIMEOUT 5)
+add_executable(http_network_test http_network_test.cpp ../http_io.c ../http_stream.c)
+target_include_directories(http_network_test PRIVATE fakes ../include ..)
+target_compile_features(http_network_test PRIVATE cxx_std_17 c_std_11)
+target_compile_options(http_network_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME http_file_transfer_async_network COMMAND http_network_test)
+set_tests_properties(http_file_transfer_async_network PROPERTIES TIMEOUT 5)
+set(PICO_SDK_PATH "$ENV{PICO_SDK_PATH}" CACHE PATH
+  "Pico SDK used for the real weather TLS regression")
+if(EXISTS "${PICO_SDK_PATH}/lib/mbedtls/library/CMakeLists.txt")
+  set(MBEDTLS_DIR "${PICO_SDK_PATH}/lib/mbedtls")
+  set(MBEDTLS_TARGET_PREFIX weather_)
+  set(MBEDTLS_CONFIG_FILE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../stage10_websocket_terminal/lib/pico-ws-server/include/mbedtls_config.h")
+  set(MBEDTLS_USER_CONFIG_FILE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../stage10_websocket_terminal/weather_tls_config.h")
+  add_subdirectory("${MBEDTLS_DIR}/library" weather_mbedtls EXCLUDE_FROM_ALL)
+  foreach(target weather_mbedcrypto weather_mbedx509 weather_mbedtls)
+    target_include_directories(${target} PUBLIC ../include)
+  endforeach()
+  file(READ ../../stage10_websocket_terminal/weather_ca.pem weather_ca)
+  configure_file(../../stage10_websocket_terminal/weather_ca.h.in
+    weather_tls/weather_ca.h @ONLY)
+  file(READ ../../stage10_websocket_terminal/chat_ca.pem chat_ca)
+  configure_file(../../stage10_websocket_terminal/chat_ca.h.in
+    weather_tls/chat_ca.h @ONLY)
+  set(Z80_HTTP_CA_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../../stage10_websocket_terminal/http_ca.pem"
+    CACHE FILEPATH "PEM trust bundle for HTTPS file transfer")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${Z80_HTTP_CA_FILE}")
+  file(READ "${Z80_HTTP_CA_FILE}" http_ca)
+  configure_file(../../stage10_websocket_terminal/http_ca.h.in
+    weather_tls/http_ca.h @ONLY)
+  if(UNIX)
+    add_executable(http_live_test http_live_test.cpp ../http_io.c ../http_stream.c)
+    target_include_directories(http_live_test PRIVATE .. ../include
+      "${CMAKE_CURRENT_BINARY_DIR}/weather_tls")
+    target_link_libraries(http_live_test PRIVATE weather_mbedtls)
+    target_compile_features(http_live_test PRIVATE cxx_std_17 c_std_11)
+    target_compile_options(http_live_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  endif()
+  add_executable(weather_tls_test weather_tls_test.cpp)
+  target_include_directories(weather_tls_test PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}/weather_tls")
+  target_link_libraries(weather_tls_test PRIVATE weather_mbedtls)
+  target_compile_features(weather_tls_test PRIVATE cxx_std_17)
+  target_compile_options(weather_tls_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  add_test(NAME weather_real_tls_config COMMAND weather_tls_test)
+  set_tests_properties(weather_real_tls_config PROPERTIES TIMEOUT 5)
+else()
+  message(STATUS "Set PICO_SDK_PATH to enable the real weather TLS regression")
+endif()
+add_executable(bus_grant_test bus_grant_test.c)
+target_include_directories(bus_grant_test PRIVATE fakes ../include)
+target_compile_features(bus_grant_test PRIVATE c_std_11)
+target_compile_options(bus_grant_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME cpu_bus_grant_fixture COMMAND bus_grant_test)
+set_tests_properties(cpu_bus_grant_fixture PROPERTIES TIMEOUT 5)
+add_executable(loader_test loader_test.c ../sram.c)
+target_include_directories(loader_test PRIVATE fakes ../include)
+target_compile_features(loader_test PRIVATE c_std_11)
+target_compile_options(loader_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME assisted_loader COMMAND loader_test)
+set_tests_properties(assisted_loader PROPERTIES TIMEOUT 10)
+add_executable(step_loader_test step_loader_test.c
+  ../supervisor.c ../bus.c ../clock.c ../cpu.c ../sram.c
+  ../../stage06_sram_dma/full_memory_test.c)
+target_include_directories(step_loader_test PRIVATE fakes ../include)
+target_compile_features(step_loader_test PRIVATE c_std_11)
+target_compile_options(step_loader_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME console_stepped_loader COMMAND step_loader_test)
+set_tests_properties(console_stepped_loader PROPERTIES TIMEOUT 10)
+
+add_executable(full_memory_test full_memory_test.c)
+target_include_directories(full_memory_test PRIVATE fakes ../include)
+target_compile_features(full_memory_test PRIVATE c_std_11)
+target_compile_options(full_memory_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME full_memory_patterns COMMAND full_memory_test)
+set_tests_properties(full_memory_patterns PROPERTIES TIMEOUT 10)
+
+add_executable(pwm_memory_test pwm_memory_test.c)
+target_include_directories(pwm_memory_test PRIVATE fakes ../include)
+target_compile_features(pwm_memory_test PRIVATE c_std_11)
+target_compile_options(pwm_memory_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME pwm_memory_screening COMMAND pwm_memory_test)
+set_tests_properties(pwm_memory_screening PROPERTIES TIMEOUT 15)
+
+find_program(SOAK_Z80ASM z80asm)
+if(SOAK_Z80ASM)
+  include(../../stage06_sram_dma/math_soak_build.cmake)
+  add_executable(math_soak_test math_soak_test.c "${soak_header}")
+  target_include_directories(math_soak_test PRIVATE fakes ../include
+    "${CMAKE_CURRENT_BINARY_DIR}")
+  target_compile_definitions(math_soak_test PRIVATE Z80_CLOCK_20MHZ=1)
+  target_compile_features(math_soak_test PRIVATE c_std_11)
+  target_compile_options(math_soak_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  add_test(NAME math_soak_controller COMMAND math_soak_test)
+  set_tests_properties(math_soak_controller PROPERTIES TIMEOUT 15)
+  add_executable(math_soak_14h_test math_soak_test.c "${soak_header}")
+  target_include_directories(math_soak_14h_test PRIVATE fakes ../include
+    "${CMAKE_CURRENT_BINARY_DIR}")
+  target_compile_definitions(math_soak_14h_test PRIVATE
+    Z80_CLOCK_20MHZ=1 Z80_SOAK_14H=1)
+  target_compile_features(math_soak_14h_test PRIVATE c_std_11)
+  target_compile_options(math_soak_14h_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  add_test(NAME math_soak_14h_controller COMMAND math_soak_14h_test)
+  set_tests_properties(math_soak_14h_controller PROPERTIES TIMEOUT 30)
+
+  add_executable(scope_test scope_test.c "${scope_header}")
+  target_include_directories(scope_test PRIVATE fakes ../include
+    "${CMAKE_CURRENT_BINARY_DIR}")
+  target_compile_definitions(scope_test PRIVATE Z80_CLOCK_20MHZ=1)
+  target_compile_features(scope_test PRIVATE c_std_11)
+  target_compile_options(scope_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  add_test(NAME scope_controller COMMAND scope_test)
+  set_tests_properties(scope_controller PROPERTIES TIMEOUT 15)
+
+  set(Z80_TEST_PYTHON "" CACHE FILEPATH "Python 3.10+ that runs the Z80 execution tests")
+  set(Z80SBC_EMULATOR_LIBRARY "" CACHE FILEPATH
+    "libz80sbc-emulator built from src/cpm/z80_debug_host (default: build/cpm/z80_debug_host)")
+  if(Z80_TEST_PYTHON)
+    execute_process(COMMAND "${Z80_TEST_PYTHON}" -c
+      "import sys; assert sys.version_info >= (3, 10)"
+      RESULT_VARIABLE z80_python_result ERROR_VARIABLE z80_python_error)
+    if(NOT z80_python_result EQUAL 0)
+      message(FATAL_ERROR "Z80_TEST_PYTHON must be Python 3.10 or newer: ${z80_python_error}")
+    endif()
+    set(z80_test_environment "")
+    if(Z80SBC_EMULATOR_LIBRARY)
+      set(z80_test_environment "Z80SBC_EMULATOR=${Z80SBC_EMULATOR_LIBRARY}")
+    endif()
+    add_test(NAME math_soak_z80_execution COMMAND "${Z80_TEST_PYTHON}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/math_soak_z80_test.py"
+      --image-builder "$<TARGET_FILE:math_soak_test>")
+    set_tests_properties(math_soak_z80_execution PROPERTIES TIMEOUT 60)
+    add_test(NAME scope_z80_execution COMMAND "${Z80_TEST_PYTHON}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/math_soak_z80_test.py"
+      --image-builder "$<TARGET_FILE:scope_test>" --scope)
+    set_tests_properties(scope_z80_execution PROPERTIES TIMEOUT 60)
+    add_test(NAME emulator_z80_unit COMMAND "${Z80_TEST_PYTHON}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/emulator_z80_test.py")
+    set_tests_properties(emulator_z80_unit PROPERTIES TIMEOUT 10)
+    add_test(NAME banked_memory_z80_execution COMMAND "${Z80_TEST_PYTHON}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/banked_memory_z80_test.py")
+    set_tests_properties(banked_memory_z80_execution PROPERTIES TIMEOUT 10)
+    foreach(bank_test IN ITEMS banked_allocator_z80_test bank1_bdos_z80_test bank0_bdos_shim_z80_test bank1_system_boot_z80_test bank_sdk_z80_test)
+      add_test(NAME ${bank_test} COMMAND "${Z80_TEST_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/${bank_test}.py")
+      set_tests_properties(${bank_test} PROPERTIES TIMEOUT 60)
+    endforeach()
+    add_test(NAME cpm_bios_z80_execution COMMAND "${Z80_TEST_PYTHON}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/cpm_boot_z80_test.py")
+    set_tests_properties(cpm_bios_z80_execution PROPERTIES TIMEOUT 60)
+    if(z80_test_environment)
+      set_tests_properties(emulator_z80_unit math_soak_z80_execution
+        scope_z80_execution banked_memory_z80_execution banked_allocator_z80_test bank1_bdos_z80_test
+        bank0_bdos_shim_z80_test bank1_system_boot_z80_test bank_sdk_z80_test
+        cpm_bios_z80_execution PROPERTIES ENVIRONMENT "${z80_test_environment}")
+    endif()
+  else()
+    message(STATUS "Z80 execution tests disabled; set Z80_TEST_PYTHON")
+  endif()
+else()
+  message(STATUS "z80asm not found; math soak host tests unavailable")
+endif()
+
+add_executable(banklib_runtime_test banklib_runtime_test.c)
+target_compile_features(banklib_runtime_test PRIVATE c_std_11)
+target_compile_options(banklib_runtime_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME bank_library_transport COMMAND banklib_runtime_test)
+set_tests_properties(bank_library_transport PROPERTIES TIMEOUT 5)
+
+add_executable(control_test control_test.c ../supervisor.c ../bus.c ../clock.c ../cpu.c ../io_trap.c ../sram.c)
+target_include_directories(control_test PRIVATE fakes ../include)
+target_compile_features(control_test PRIVATE c_std_11)
+target_compile_options(control_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME control_faults COMMAND control_test)
+set_tests_properties(control_faults PROPERTIES TIMEOUT 5)
+
+add_executable(clock_test clock_test.c ../clock.c)
+target_include_directories(clock_test PRIVATE fakes ../include)
+target_compile_features(clock_test PRIVATE c_std_11)
+target_compile_options(clock_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME clock_timing COMMAND clock_test)
+set_tests_properties(clock_timing PROPERTIES TIMEOUT 10)
+
+foreach(rate_test IN ITEMS clock control pwm_memory)
+  get_target_property(rate_sources ${rate_test}_test SOURCES)
+  add_executable(${rate_test}_20mhz_test ${rate_sources})
+  target_include_directories(${rate_test}_20mhz_test PRIVATE fakes ../include)
+  target_compile_features(${rate_test}_20mhz_test PRIVATE c_std_11)
+  target_compile_options(${rate_test}_20mhz_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  target_compile_definitions(${rate_test}_20mhz_test PRIVATE Z80_CLOCK_20MHZ=1)
+  add_test(NAME ${rate_test}_20mhz COMMAND ${rate_test}_20mhz_test)
+  set_tests_properties(${rate_test}_20mhz PROPERTIES TIMEOUT 15)
+endforeach()
+
+add_executable(stage02_test stage02_test.c ../supervisor.c)
+target_include_directories(stage02_test PRIVATE fakes ../include)
+target_compile_features(stage02_test PRIVATE c_std_11)
+target_compile_options(stage02_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME stage02_buffer_paths COMMAND stage02_test)
+set_tests_properties(stage02_buffer_paths PROPERTIES TIMEOUT 5)
+
+add_executable(reset_meter_test reset_meter_test.c ../supervisor.c)
+target_include_directories(reset_meter_test PRIVATE fakes ../include)
+target_compile_features(reset_meter_test PRIVATE c_std_11)
+target_compile_options(reset_meter_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME reset_held_meter COMMAND reset_meter_test)
+set_tests_properties(reset_held_meter PROPERTIES TIMEOUT 5)
+
+add_executable(disk_test disk_test.c)
+target_include_directories(disk_test PRIVATE fakes ../include)
+target_compile_features(disk_test PRIVATE c_std_11)
+target_compile_options(disk_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME disk_protocol COMMAND disk_test)
+set_tests_properties(disk_protocol PROPERTIES TIMEOUT 5)
+
+add_executable(flash_backend_test flash_backend_test.c)
+target_include_directories(flash_backend_test PRIVATE fakes ../include)
+target_compile_features(flash_backend_test PRIVATE c_std_11)
+target_compile_options(flash_backend_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME flash_backend_recovery COMMAND flash_backend_test)
+set_tests_properties(flash_backend_recovery PROPERTIES TIMEOUT 15)
+
+include(../../stage09_flash_storage/disk_diagnostic_build.cmake)
+add_executable(usb_console_test usb_console_test.c)
+target_include_directories(usb_console_test PRIVATE fakes/threaded fakes)
+target_compile_features(usb_console_test PRIVATE c_std_11)
+target_compile_options(usb_console_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME usb_core1_console COMMAND usb_console_test)
+set_tests_properties(usb_core1_console PROPERTIES TIMEOUT 5)
+foreach(stage09_test_target IN ITEMS stage09_test stage09_autoboot_test stage10_test)
+  add_executable(${stage09_test_target} stage09_test.c ../terminal_queue.c
+    ../../stage09_flash_storage/ansi_input.c "${diagnostic_header}")
+  target_include_directories(${stage09_test_target} PRIVATE fakes ../include
+    ../../stage10_websocket_terminal
+    "${CMAKE_CURRENT_BINARY_DIR}")
+  target_compile_definitions(${stage09_test_target} PRIVATE
+    Z80_CLOCK_20MHZ=1)
+  target_compile_features(${stage09_test_target} PRIVATE c_std_11)
+  target_compile_options(${stage09_test_target} PRIVATE
+    -Wall -Wextra -Werror -UNDEBUG)
+endforeach()
+target_compile_definitions(stage09_autoboot_test PRIVATE Z80_STAGE09_AUTOBOOT=1)
+target_compile_definitions(stage10_test PRIVATE
+  Z80_STAGE09_AUTOBOOT=1 Z80_STAGE10_NETWORK=1)
+add_test(NAME stage10_autoboot_and_routing COMMAND stage10_test)
+add_test(NAME stage09_usb_cpm COMMAND stage09_test)
+add_test(NAME stage09_autoboot_cpm COMMAND stage09_autoboot_test)
+set_tests_properties(stage09_usb_cpm stage09_autoboot_cpm PROPERTIES TIMEOUT 5)
+
+add_executable(network_test network_test.cpp)
+target_include_directories(network_test PRIVATE fakes ../include
+  ../../stage10_websocket_terminal)
+target_compile_features(network_test PRIVATE cxx_std_17)
+target_compile_options(network_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME terminal_connections COMMAND network_test)
+set_tests_properties(terminal_connections PROPERTIES TIMEOUT 5)
+
+add_executable(network_no_wifi_test network_test.cpp)
+target_include_directories(network_no_wifi_test PRIVATE fakes ../include
+  ../../stage10_websocket_terminal)
+target_compile_definitions(network_no_wifi_test PRIVATE TEST_NO_WIFI=1)
+target_compile_features(network_no_wifi_test PRIVATE cxx_std_17)
+target_compile_options(network_no_wifi_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME terminal_led_without_wifi COMMAND network_no_wifi_test)
+set_tests_properties(terminal_led_without_wifi PROPERTIES TIMEOUT 5)
+
+set(ws_source "${CMAKE_CURRENT_LIST_DIR}/../../stage10_websocket_terminal/lib/pico-ws-server")
+if(TARGET weather_mbedcrypto)
+  add_executable(websocket_transport_test websocket_transport_test.cpp
+    "${ws_source}/src/web_socket_server.cpp"
+    "${ws_source}/src/web_socket_server_internal.cpp"
+    "${ws_source}/src/client_connection.cpp"
+    "${ws_source}/src/http_handler.cpp"
+    "${ws_source}/src/web_socket_handler.cpp")
+  target_include_directories(websocket_transport_test PRIVATE
+    fakes/websocket "${ws_source}/src" "${ws_source}/include")
+  target_link_libraries(websocket_transport_test PRIVATE weather_mbedcrypto)
+  target_compile_features(websocket_transport_test PRIVATE cxx_std_17)
+  target_compile_definitions(websocket_transport_test PRIVATE DEBUG_PRINT=0)
+  target_compile_options(websocket_transport_test PRIVATE
+    -Wall -Wextra -Werror -UNDEBUG)
+  foreach(case send flush receive limits invalid lifecycle http disconnects diagnostics allocations)
+    add_test(NAME websocket_${case} COMMAND websocket_transport_test ${case})
+    set_tests_properties(websocket_${case} PROPERTIES TIMEOUT 5)
+  endforeach()
+else()
+  message(STATUS "Set PICO_SDK_PATH to enable real WebSocket transport regressions")
+endif()
+
+find_package(Threads REQUIRED)
+target_link_libraries(usb_console_test PRIVATE Threads::Threads)
+add_executable(terminal_queue_test terminal_queue_test.c)
+target_include_directories(terminal_queue_test PRIVATE fakes/threaded fakes ../include)
+target_compile_features(terminal_queue_test PRIVATE c_std_11)
+target_compile_options(terminal_queue_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(terminal_queue_test PRIVATE Threads::Threads)
+add_test(NAME terminal_concurrent_rings COMMAND terminal_queue_test)
+set_tests_properties(terminal_concurrent_rings PROPERTIES TIMEOUT 15)
+
+add_executable(network_setup_test network_setup_test.c
+  ../../cpm/dcc_io_adapter/host/PortDrivers/environment_io.c)
+target_include_directories(network_setup_test PRIVATE fakes ../include ..)
+target_compile_definitions(network_setup_test PRIVATE Z80_ENV_FLASH=1)
+target_compile_features(network_setup_test PRIVATE c_std_11)
+target_compile_options(network_setup_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME network_env_provisioning COMMAND network_setup_test)
+
+add_executable(progress_test progress_test.c)
+target_include_directories(progress_test PRIVATE fakes ../include)
+target_compile_features(progress_test PRIVATE c_std_11)
+target_compile_options(progress_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME qualification_progress COMMAND progress_test)
+set_tests_properties(qualification_progress PROPERTIES TIMEOUT 5)
+
+add_executable(stage08_test qualification_test.c ../bus.c)
+target_include_directories(stage08_test PRIVATE fakes ../include)
+target_compile_features(stage08_test PRIVATE c_std_11)
+target_compile_options(stage08_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME stage08_port_aliases COMMAND stage08_test)
+set_tests_properties(stage08_port_aliases PROPERTIES TIMEOUT 5)
+
+find_program(NODE_EXECUTABLE node)
+if(NODE_EXECUTABLE)
+	add_test(NAME terminal_keyboard
+		COMMAND ${NODE_EXECUTABLE} --test ${CMAKE_CURRENT_LIST_DIR}/../../stage10_websocket_terminal/terminal.test.mjs)
+	set_tests_properties(terminal_keyboard PROPERTIES TIMEOUT 5)
+endif()
