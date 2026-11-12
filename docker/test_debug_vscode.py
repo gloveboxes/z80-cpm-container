@@ -19,6 +19,8 @@ def main():
     parser.add_argument("program", type=Path)
     parser.add_argument("source", type=Path)
     parser.add_argument("--proxy", type=Path, default=Path(__file__).with_name("debug_proxy.py"))
+    parser.add_argument("--sbc-root", type=Path)
+    parser.add_argument("--disk-dir", type=Path)
     args = parser.parse_args()
     workspace = args.workspace.resolve(strict=True)
     program = args.program.resolve(strict=True)
@@ -76,11 +78,16 @@ def main():
     try:
         response(send("initialize", {"adapterID": "cppdbg", "linesStartAt1": True,
                                       "columnsStartAt1": True, "pathFormat": "path"}))
+        debugger_args = f'--workspace "{workspace}" --program "{program}"'
+        if args.sbc_root:
+            debugger_args += f' --sbc-root "{args.sbc_root.resolve(strict=True)}"'
+        if args.disk_dir:
+            debugger_args += f' --disk-dir "{args.disk_dir.resolve(strict=True)}"'
         send("launch", {
             "name": "SOUND", "type": "cppdbg", "request": "launch",
             "program": str(program), "cwd": str(program.parent), "MIMode": "gdb",
             "miDebuggerPath": str(proxy),
-            "miDebuggerArgs": f'--workspace "{workspace}" --program "{program}"',
+            "miDebuggerArgs": debugger_args,
             "targetArchitecture": "x86", "stopAtEntry": False,
             "launchCompleteCommand": "exec-continue", "externalConsole": False,
         })

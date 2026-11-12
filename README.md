@@ -29,6 +29,8 @@ uses four writable host images for persistence. Drive A boot tracks and
 `AUTORUN.COM` are refreshed on startup. Stop the emulator before modifying
 mounted disks. `--web-port`, `--sound-port`, and `--console-port` select
 different localhost ports. `--skip-build` reuses the locally built image.
+Pass `--sbc-root /absolute/path/to/SBC` to build CP/M and BIOS from a
+read-only SBC checkout instead of the image's bundled sources.
 
 ## VS Code C debugging
 
@@ -58,6 +60,8 @@ Pass `--disk-dir /absolute/path/to/disks` in `miDebuggerArgs` to mount the four
 host disks read-only and snapshot them at debug startup. The target replaces
 its namesake only on snapshot drive B. Stop any writer before starting the
 debugger so the snapshot is consistent.
+Pass `--sbc-root` in `miDebuggerArgs` to use the CP/M and BIOS sources in an
+SBC checkout inside the mounted workspace.
 
 Other repositories can use this project as a submodule. Point their VS Code
 `miDebuggerPath` to `docker/debug_proxy.py` in the submodule, pass their

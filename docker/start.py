@@ -75,6 +75,7 @@ def run_console(client, shim, name):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--disk-dir", type=Path, help="directory of writable host 512 KiB disks")
+    parser.add_argument("--sbc-root", type=Path, help="use CP/M sources from this SBC checkout")
     parser.add_argument("--web-port", type=int, default=8080)
     parser.add_argument("--sound-port", type=int, default=8766)
     parser.add_argument("--console-port", type=int, default=8767)
@@ -100,6 +101,10 @@ def main():
             parser.error(f"{disks} must be writable")
     else:
         disks = None
+    sbc_root = args.sbc_root.resolve(strict=True) if args.sbc_root else None
+    if sbc_root is not None and ("," in str(sbc_root) or
+                                 not (sbc_root / "src/cpm/build_images.py").is_file()):
+        parser.error("--sbc-root must name an SBC checkout without commas in its path")
 
     command("container", "system", "status")
     if not args.skip_build:
@@ -117,6 +122,9 @@ def main():
     ]
     if disks:
         options += ["--mount", f"type=bind,source={disks},target=/opt/altair/disks"]
+    if sbc_root is not None:
+        options += ["--mount", f"type=bind,source={sbc_root},target=/opt/sbc-source,readonly",
+                    "--env", "Z80_CPM_SBC_ROOT=/opt/sbc-source"]
     options.append(IMAGE)
     shim = None
     started = False

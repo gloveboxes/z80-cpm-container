@@ -15,7 +15,7 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-SBC = ROOT / "sbc"
+SBC = Path(os.environ.get("Z80_CPM_SBC_ROOT", ROOT / "sbc"))
 CPM = SBC / "src" / "cpm"
 DISKS = ROOT / "disks"
 BUILD = Path(os.environ.get("ALTAIR_SBC_BUILD_DIR", ROOT / "build"))

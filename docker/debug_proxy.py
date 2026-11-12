@@ -16,6 +16,7 @@ def main():
     parser.add_argument("--workspace", required=True, type=Path)
     parser.add_argument("--disk-dir", type=Path,
                         help="snapshot these 512 KiB disks for this debug session")
+    parser.add_argument("--sbc-root", type=Path, help="use CP/M sources from this SBC checkout")
     parser.add_argument("--image", default="z80-cpm:local")
     parser.add_argument("--sound-port", type=int, default=8768)
     parser.add_argument("--web-port", type=int, default=8081)
@@ -31,6 +32,12 @@ def main():
         parser.error("program must be inside the workspace")
     if "," in str(workspace):
         parser.error("workspace paths containing commas cannot be bind mounted")
+    sbc_root = args.sbc_root.resolve(strict=True) if args.sbc_root else None
+    if sbc_root is not None:
+        if not sbc_root.is_relative_to(workspace):
+            parser.error("--sbc-root must be inside the mounted workspace")
+        if not (sbc_root / "src/cpm/build_images.py").is_file():
+            parser.error("--sbc-root must name an SBC checkout")
     disks = None
     if args.disk_dir:
         disks = args.disk_dir.resolve(strict=True)
@@ -56,6 +63,8 @@ def main():
     ]
     if disks is not None:
         command.extend(["--mount", f"type=bind,source={disks},target=/opt/debug-disks,readonly"])
+    if sbc_root is not None:
+        command.extend(["--env", f"Z80_CPM_SBC_ROOT={sbc_root}"])
     command.extend([
         "--entrypoint", "python3", args.image,
         "/opt/altair/runtime/debug_session.py", str(program),
