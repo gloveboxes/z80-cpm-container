@@ -77,7 +77,6 @@ int main(int argc, char **argv)
         ma_pcm_rb_uninit(&ring);
         return 1;
     }
-    fprintf(stderr, "sound shim: waiting for localhost:%ld\n", port);
     for (;;) {
         socket_t fd = socket(AF_INET, SOCK_STREAM, 0);
         if (fd == INVALID_FD) {
@@ -100,10 +99,7 @@ int main(int argc, char **argv)
             int count = recv(fd, (char *)bytes + used, (int)(sizeof(bytes) - used), 0);
             if (count <= 0)
                 break;
-            if (!received) {
-                fprintf(stderr, "sound shim: receiving audio\n");
-                received = 1;
-            }
+            received = 1;
             used += (size_t)count;
             size_t frames = used / sizeof(float);
             size_t remaining = frames;
