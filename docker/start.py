@@ -41,9 +41,6 @@ def run_console(client, shim, name):
     try:
         if saved is not None:
             tty.setraw(input_fd)
-            settings = termios.tcgetattr(input_fd)
-            settings[3] |= termios.ISIG
-            termios.tcsetattr(input_fd, termios.TCSANOW, settings)
         next_check = time.monotonic() + 2
         while True:
             readable, _, _ = select.select(
@@ -56,7 +53,11 @@ def run_console(client, shim, name):
             if watching_input and input_fd in readable:
                 data = os.read(input_fd, 4096)
                 if data:
-                    client.sendall(data)
+                    data, escape, _ = data.partition(b"\x1d")  # Ctrl+]
+                    if data:
+                        client.sendall(data)
+                    if escape:
+                        return
                 else:
                     watching_input = False
             if shim.poll() is not None:
@@ -152,7 +153,7 @@ def main():
         time.sleep(0.5)
         if shim.poll() is not None:
             raise RuntimeError(f"sound shim exited with status {shim.returncode}")
-        print(f"Terminal: {url} (Ctrl+C stops the container and sound shim)", flush=True)
+        print(f"Terminal: {url} (Ctrl+] stops the container and sound shim; Ctrl+C goes to CP/M)", flush=True)
         with socket.create_connection(("127.0.0.1", args.console_port), timeout=10) as client:
             client.settimeout(None)
             run_console(client, shim, name)

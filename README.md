@@ -20,8 +20,10 @@ python3 docker/start.py
 
 CP/M boots in the console. Open <http://127.0.0.1:8080/> to switch input and
 output to the browser; disconnect the browser to return to the console. Press
-Enter after a handover to show the current prompt. Ctrl+C stops the launcher,
-audio client and container. The audio client is also buildable on Windows and
+Enter after a handover to show the current prompt. Ctrl+] in the task terminal
+stops the launcher, audio client and container. Ctrl+C is sent to CP/M so
+applications such as MBASIC can use it to interrupt a program.
+The audio client is also buildable on Windows and
 Linux; container orchestration currently targets macOS.
 
 The image includes four 512 KiB disks. Changes to bundled disks are discarded
@@ -77,6 +79,10 @@ the submodule before debugging. The `.COM` must be within the mounted workspace.
 The image and host audio client are shared build outputs, not modified disks.
 
 ## Validation
+
+Run console-key regressions on a POSIX host with
+`python3 docker/test_console.py -v`. They use pseudo-terminals and sockets,
+without starting a container or playing audio.
 
 Run startup disk-integrity regressions inside the image. They use temporary
 copies of the bundled disks and do not start CP/M:
