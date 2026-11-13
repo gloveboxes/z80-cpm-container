@@ -146,6 +146,7 @@ def main():
                     command("container", "logs", name)
                     raise RuntimeError(f"container did not become ready at {url}")
                 time.sleep(0.2)
+        command("container", "logs", name)
         executable = BUILD / "altair-sound"
         shim = subprocess.Popen([str(executable), str(args.sound_port)], cwd=ROOT)
         time.sleep(0.5)

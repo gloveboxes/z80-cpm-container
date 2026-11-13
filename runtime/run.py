@@ -61,12 +61,39 @@ def build_host(audio: bool) -> tuple[Path, Path]:
     return host, adapters[0]
 
 
+def validate_disks(paths: list[Path]) -> None:
+    fsck = shutil.which("fsck.cpm")
+    if fsck is None:
+        raise RuntimeError("fsck.cpm is required to check disk integrity before starting CP/M")
+    for path in paths:
+        if path.stat().st_size != build_images.DISK_IMAGE_BYTES:
+            raise ValueError(f"{path.name}: disk image must be exactly 512 KiB")
+    with tempfile.TemporaryDirectory(prefix="altair-disk-check-") as directory:
+        diskdefs = Path(directory) / "diskdefs"
+        diskdefs.write_text(build_images.cpm_diskdefs(), encoding="ascii")
+        environment = {**os.environ, "DISKDEFS": str(diskdefs)}
+        for path in paths:
+            result = subprocess.run(
+                [fsck, "-f", "z80sbc", "-n", str(path.resolve())],
+                cwd=directory, env=environment, capture_output=True, text=True,
+            )
+            if result.returncode:
+                details = (result.stdout + result.stderr).strip()
+                raise RuntimeError(
+                    f"Disk integrity check failed for {path.name} "
+                    f"(fsck.cpm exit {result.returncode}):\n{details}\n"
+                    "CP/M was not started; no disk images were updated."
+                )
+            print(f"filesystem validated: {path.name}", flush=True)
+
+
 def prepare_images() -> bytes:
     assembler = shutil.which("z80asm")
     cpmcp = shutil.which("cpmcp")
     if not assembler or not cpmcp:
         raise RuntimeError("z80asm and cpmtools (cpmcp and cpmrm) must be on PATH")
     paths = [DISKS / name for name in build_images.SOURCE_DISK_NAMES]
+    validate_disks(paths)
     disks = [path.read_bytes() for path in paths]
     if any(len(disk) != build_images.DISK_IMAGE_BYTES for disk in disks):
         raise ValueError("all local disk images must be exactly 512 KiB")

@@ -26,7 +26,13 @@ Linux; container orchestration currently targets macOS.
 
 The image includes four 512 KiB disks. Changes to bundled disks are discarded
 with the container. `python3 docker/start.py --disk-dir /absolute/path/to/disks`
-uses four writable host images for persistence. Drive A boot tracks and
+uses four writable host images for persistence. Before refreshing Drive A or
+starting CP/M, all four images must pass exact-size checks and read-only
+`fsck.cpm -n` filesystem validation. Failure reports the affected disk and
+stops startup without updating images; no automatic repair is performed.
+The launcher displays the container's startup logs, including each disk's
+validation result, before connecting the console.
+Drive A boot tracks and
 `AUTORUN.COM` are refreshed on startup. Stop the emulator before modifying
 mounted disks. `--web-port`, `--sound-port`, and `--console-port` select
 different localhost ports. `--skip-build` reuses the locally built image.
@@ -71,6 +77,14 @@ the submodule before debugging. The `.COM` must be within the mounted workspace.
 The image and host audio client are shared build outputs, not modified disks.
 
 ## Validation
+
+Run startup disk-integrity regressions inside the image. They use temporary
+copies of the bundled disks and do not start CP/M:
+
+```sh
+container run --rm --mount "type=bind,source=$PWD,target=/test,readonly" \
+  --entrypoint python3 z80-cpm:local /test/docker/test_disk_integrity.py
+```
 
 Run `node docker/test_handover.mjs` against a test container with ports
 18080:8080, 18766:8766 and 18767:8767. In a fresh test container,
